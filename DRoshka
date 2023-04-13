@@ -1,0 +1,235 @@
+*&---------------------------------------------------------------------*
+*& Report z_dr_salv
+*&---------------------------------------------------------------------*
+*&
+*&---------------------------------------------------------------------*
+REPORT z_dr_salv.
+
+TYPES: BEGIN OF ty_kundenauftrag1,
+         vbeln       TYPE vbeln,
+         ernam       TYPE ernam,
+         erdat       TYPE erdat,
+         vkorg       TYPE vkorg,
+         vtweg       TYPE vtweg,
+         spart       TYPE spart,
+         kunnr       TYPE kunnr,
+         name1       TYPE name1,
+         stras       TYPE stras,
+         pstlz       TYPE pstlz,
+         ort01       TYPE ort01,
+         ofPos       TYPE posnr,
+         vorhPos     TYPE posnr,
+         gbstk       TYPE gbstk,
+         lf_vbeln    TYPE vbeln_nach,
+         lf_counter  TYPE i,
+         lf_vbelnr   TYPE vbeln_nach,
+         lf_counterr TYPE i,
+       END OF ty_kundenauftrag1.
+
+TABLES:
+  vbak.
+
+DATA: ls_kundenauftrag TYPE ty_kundenauftrag1,
+      lt_kundenauftrag TYPE STANDARD TABLE OF ty_kundenauftrag1,
+      lt_belegfluss    TYPE STANDARD TABLE OF vbfa,
+      ls_comwa         TYPE vbco6,
+      gf_vorhPos       TYPE i,
+      lf_vbeln         TYPE vbeln_nach,
+      lf_counter       TYPE i,
+      lf_vbelnr        TYPE vbeln_nach,
+      lf_counterr      TYPE i,
+      o_salv           TYPE REF TO cl_salv_table,
+      o_events         TYPE REF TO cl_salv_events_table
+      .
+
+CLASS lcl_events DEFINITION.
+  PUBLIC SECTION.
+    CLASS-METHODS: on_double_click_ka FOR EVENT if_salv_events_actions_table~double_click
+      OF cl_salv_events_table
+      IMPORTING row column.
+ENDCLASS.
+
+CLASS lcl_events IMPLEMENTATION.
+
+  METHOD on_double_click_ka.
+
+    READ TABLE lt_kundenauftrag INDEX row ASSIGNING FIELD-SYMBOL(<ls_kundenauftrag3>).
+    CASE column.
+
+      WHEN 'VBELN'.
+        CALL FUNCTION 'AUTHORITY_CHECK_TCODE'
+          EXPORTING
+            tcode  = 'VA03'
+          EXCEPTIONS
+            ok     = 1
+            not_ok = 2
+            OTHERS = 3.
+
+        CASE sy-subrc.
+          WHEN 1.
+             MESSAGE 'Autorisiert' TYPE 'S'.
+          WHEN 2.
+            MESSAGE 'Nicht autorisiert' TYPE 'S'.
+          WHEN OTHERS.
+            MESSAGE 'Unbekannt' TYPE 'S'.
+        ENDCASE.
+
+        ls_comwa-vbeln = <ls_kundenauftrag3>-vbeln.
+        SET PARAMETER ID 'AUN' FIELD ls_comwa-vbeln.
+        CALL TRANSACTION 'VA03' AND SKIP FIRST SCREEN. "Anzeige des Kundenauftrags
+
+      WHEN 'LF_VBELN'.
+        SET PARAMETER ID 'VL' FIELD <ls_kundenauftrag3>-lf_vbeln.
+        CALL TRANSACTION 'VL03N' AND SKIP FIRST SCREEN. "Anzeige der Auslieferung
+
+      WHEN 'LF_VBELNR'.
+        SET PARAMETER ID 'VF' FIELD  ls_kundenauftrag-lf_vbelnr.
+        CALL TRANSACTION 'VF03' AND SKIP FIRST SCREEN. "Anzeige der Faktura
+
+      WHEN OTHERS.
+    ENDCASE.
+  ENDMETHOD.
+
+ENDCLASS.
+
+SELECTION-SCREEN BEGIN OF BLOCK bk01 WITH FRAME.
+  SELECT-OPTIONS:
+    s_KUNNR FOR vbak-kunnr,
+    s_ERDAT FOR vbak-erdat,
+    s_VBELN FOR vbak-vbeln,
+    s_GBSTK FOR vbak-gbstk.
+SELECTION-SCREEN END OF BLOCK bk01.
+
+*AT SELECTION-SCREEN.
+*
+*  AUTHORITY-CHECK OBJECT 'vbak'
+*  ID 'kunnr' FIELD vbak-kunnr.
+*  IF sy-subrc = 4.
+*     MESSAGE 'No authorization' TYPE 'S'.
+*  ELSEIF sy-subrc <> 0.
+*    MESSAGE e184(sabapdocu) WITH text-010.
+*  ENDIF.
+
+START-OF-SELECTION.
+
+  SELECT v~vbeln, v~ernam, v~erdat, v~vkorg, v~vtweg, v~spart, v~kunnr,
+         k~name1, k~stras, k~pstlz, k~ort01,
+         p~posnr, p~posnr,
+         v~gbstk
+    FROM         vbak AS v
+      LEFT OUTER JOIN kna1 AS k ON v~kunnr = k~kunnr
+      LEFT OUTER JOIN vbap AS p ON p~vbeln = v~vbeln
+   INTO TABLE @lt_kundenauftrag
+     WHERE v~kunnr IN @s_KUNNR
+     AND   v~erdat IN @s_erdat
+     AND   v~vbeln IN @s_VBELN
+     AND   v~gbstk IN @s_gbstk
+     .
+
+  IF sy-subrc = 0.
+  ELSE.
+    WRITE 'Keine Daten gelesen!'.
+    EXIT.
+  ENDIF.
+
+END-OF-SELECTION.
+
+  DATA(lf_count_posnr) = lines( lt_kundenauftrag ).
+
+  LOOP AT lt_kundenauftrag ASSIGNING FIELD-SYMBOL(<ls_kundenauftrag>).
+    <ls_kundenauftrag>-ofpos = lf_count_posnr.
+    CLEAR : <ls_kundenauftrag>-vorhPos.
+  ENDLOOP.
+
+  LOOP AT lt_kundenauftrag ASSIGNING FIELD-SYMBOL(<ls_kundenauftrag2>)
+                             WHERE (  gbstk = 'A'
+                                   OR gbstk = 'B' )
+                             AND   kunnr > 0.
+    ls_kundenauftrag-vorhPos += 1.
+  ENDLOOP.
+
+  MODIFY lt_kundenauftrag FROM ls_kundenauftrag TRANSPORTING vorhPos
+                            WHERE (  gbstk = 'A'
+                                  OR gbstk = 'B' )
+                            AND   kunnr > 0.
+
+  TRY.
+      cl_salv_table=>factory(
+      EXPORTING
+        list_display   = if_salv_c_bool_sap=>false
+        IMPORTING
+          r_salv_table   = o_salv
+        CHANGING
+          t_table        = lt_kundenauftrag
+      ).
+
+      o_events = o_salv->get_event(  ).
+      SET HANDLER lcl_events=>on_double_click_ka FOR o_events.
+
+      o_salv->get_functions( )->set_all( abap_true ).
+      o_salv->get_columns( )->set_optimize( abap_true ).
+      o_salv->get_display_settings( )->set_list_header( 'Überschrift' ).
+      o_salv->get_display_settings( )->set_striped_pattern( abap_true ).
+      o_salv->get_selections( )->set_selection_mode( if_salv_c_selection_mode=>row_column ).
+
+    CATCH cx_salv_msg.
+  ENDTRY.
+
+  READ TABLE lt_kundenauftrag INDEX 1 ASSIGNING <ls_kundenauftrag>.
+
+  ls_comwa-vbeln = <ls_kundenauftrag>-vbeln.
+
+CALL FUNCTION 'RV_ORDER_FLOW_INFORMATION'
+  EXPORTING
+*    aufbereitung  = '2'
+*    belegtyp      = '    '
+    comwa         = ls_comwa
+*    nachfolger    = 'X'
+*    n_stufen      = '50'
+*    vorgaenger    = 'X'
+*    v_stufen      = '50'
+*    no_acc_doc    = space
+*  IMPORTING
+*    belegtyp_back =
+  TABLES
+    vbfa_tab      = lt_belegfluss
+*  EXCEPTIONS
+*    no_vbfa       = 1
+*    no_vbuk_found = 2
+*    others        = 3
+  .
+IF SY-SUBRC <> 0.
+* MESSAGE ID SY-MSGID TYPE SY-MSGTY NUMBER SY-MSGNO
+*   WITH SY-MSGV1 SY-MSGV2 SY-MSGV3 SY-MSGV4.
+ENDIF.
+
+  LOOP AT lt_belegfluss ASSIGNING FIELD-SYMBOL(<ls_belegfluss>)
+  WHERE vbtyp_n = 'J'.
+    IF lf_vbeln IS INITIAL.
+      lf_vbeln = <ls_belegfluss>-vbeln.
+    ENDIF.
+    lf_counter += 1.
+  ENDLOOP.
+
+  CLEAR : ls_kundenauftrag.
+  ls_kundenauftrag-lf_vbeln = lf_vbeln.
+  ls_kundenauftrag-lf_counter = lf_counter.
+
+  MODIFY lt_kundenauftrag FROM ls_kundenauftrag TRANSPORTING lf_vbeln lf_counter
+                              WHERE vbeln = <ls_kundenauftrag>-vbeln.
+
+  LOOP AT lt_belegfluss ASSIGNING FIELD-SYMBOL(<ls_belegfluss2>)
+  WHERE vbtyp_n = 'M'.
+    IF lf_vbelnr IS INITIAL.
+      lf_vbelnr = <ls_belegfluss2>-vbeln.
+    ENDIF.
+    lf_counterr += 1.
+  ENDLOOP.
+
+  ls_kundenauftrag-lf_vbelnr = lf_vbelnr.
+  ls_kundenauftrag-lf_counterr = lf_counterr.
+
+  MODIFY lt_kundenauftrag FROM ls_kundenauftrag TRANSPORTING lf_vbelnr lf_counterr
+                            WHERE vbeln = <ls_kundenauftrag>-vbeln.
+
+  o_salv->display( ).
